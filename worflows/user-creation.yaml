@@ -1,0 +1,63 @@
+main:
+  params: [event]
+  steps:
+      - decode_pubsub_message:
+          assign:
+          - base64: ${base64.decode(event.data.message.data)}
+          - jsonMessage: ${json.decode(text.decode(base64))}
+          - eventName: ${jsonMessage.protoPayload.metadata.event[0].eventName}
+          - userUPN: ${jsonMessage.protoPayload.metadata.event[0].parameter[0].value}
+      - get_user_metadata:
+          call: http.get
+          args:
+            url: ${"https://admin.googleapis.com/admin/directory/v1/users/"+userUPN}
+            auth:
+              type: OAuth2
+              scopes: https://www.googleapis.com/auth/admin.directory.user
+          result: userMetadata
+      - extract_alternative_email:
+          assign: 
+            - altEmail: ${subworkflow_extract_alternative_email(userMetadata.body.externalIds)}
+      - checkAltEmail:
+          switch:
+            - condition: ${altEmail == null}  
+              return: "No alternate email found"
+      - checkCurrentUserAlias:
+          switch:
+            - condition: ${"aliases" in userMetadata.body and altEmail in userMetadata.body.aliases}  
+              return: "No change required"
+      - setUserAlias:
+          call: http.post
+          args:
+              url: ${"https://admin.googleapis.com/admin/directory/v1/users/"+userUPN+"/aliases"}
+              body: 
+                "alias": ${altEmail}
+              auth:
+                type: OAuth2
+                scopes:  https://www.googleapis.com/auth/admin.directory.user
+          result: setUserAliasResponse
+      - return_output:
+          return: '${"Add "+altEmail+" as alias email for "+userUPN}'
+subworkflow_extract_alternative_email:
+    params: [externalIds]
+    steps:
+        - initVariable:
+            assign:
+            - tempAltEmail: null
+        - loopExternalIds:
+            for:
+              value: externalId
+              in: ${externalIds}
+              steps:
+                  - checkType:
+                      switch:
+                        - condition: ${externalId.type != "login_id"}
+                          next: continue
+                      next: define
+                  - define:
+                      assign:
+                      - tempAltEmail: ${externalId.value}
+                  - exit:
+                      next: break              
+        - prepareMessage:
+            return: ${tempAltEmail}

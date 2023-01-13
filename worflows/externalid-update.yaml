@@ -1,0 +1,131 @@
+main:
+  # Pub/Sub message/event
+  params: [event]
+  steps:
+      # Pub/Sub message as base64 encoded strings
+      # Fully decode JSON Payload message
+      - decode_pubsub_message:
+          assign:
+          - pubsubMessage: ${base64.decode(event.data.message.data)}
+          - jsonMessage: ${json.decode((pubsubMessage)}
+          - eventName: ${jsonMessage.protoPayload.metadata.event[0].eventName}
+      # Extract from JSON Payload the userUPN, oldAlternateEmail, newAlternateEmail
+      - extract_event_data:
+          assign: 
+            - eventData: ${subworkflow_extract_event_data(jsonMessage.protoPayload.metadata.event[0].parameter)}
+            - userUPN: ${eventData.UserUPN}
+            - oldAlternateEmail: ${eventData.OldAlternateEmail}
+            - newAlternateEmail: ${eventData.NewAlternateEmail}
+            - output: ['${"Update on "+userUPN+" aliases"}']
+      # Retrieve metadata for the user identified by its userUPN
+      - get_user_metadata:
+          call: http.get
+          args:
+            url: ${"https://admin.googleapis.com/admin/directory/v1/users/"+userUPN}
+            auth:
+              type: OAuth2
+              scopes: https://www.googleapis.com/auth/admin.directory.user
+          result: userMetadata
+      - log_tmp:
+            call: sys.log
+            args:
+                text: ${userMetadata.body}
+                severity: DEBUG
+      # OldAlternateEmail should be deleted on user's aliases
+      # NewAlternateEmail should be added on user's aliases
+      - parallelStep:
+            parallel:
+                shared: [output]
+                branches:
+                - aliasDeletion:
+                    steps:
+                        - checkNeedDeletion:
+                            switch:
+                                - condition: ${oldAlternateEmail!="" and "aliases" in userMetadata.body and oldAlternateEmail in userMetadata.body.aliases}
+                                  steps:
+                                  - deletion:
+                                        call: http.delete
+                                        args:
+                                            url: ${"https://admin.googleapis.com/admin/directory/v1/users/"+userUPN+"/aliases/"+oldAlternateEmail}
+                                            auth:
+                                                type: OAuth2
+                                                scopes:  https://www.googleapis.com/auth/admin.directory.user
+                                        result: deleteUserAliasResponse
+                                  - deletionOuput:
+                                        assign:
+                                        - output: '${list.concat(output, oldAlternateEmail+" removed")}'
+                                  - log_deleteUserAliasResponse:
+                                        call: sys.log
+                                        args:
+                                            text: ${deleteUserAliasResponse}
+                                            severity: DEBUG
+                - aliasCreation:
+                    steps:
+                        - checkNeedCreation:
+                            switch:
+                                - condition: ${newAlternateEmail!="" and(not("aliases" in userMetadata.body) or not(newAlternateEmail in userMetadata.body.aliases))}
+                                  steps:
+                                  - creation:
+                                        call: http.post
+                                        args:
+                                            url: ${"https://admin.googleapis.com/admin/directory/v1/users/"+userUPN+"/aliases"}
+                                            body: 
+                                                "alias": ${newAlternateEmail}
+                                            auth:
+                                                type: OAuth2
+                                                scopes:  https://www.googleapis.com/auth/admin.directory.user
+                                        result: createUserAliasResponse
+                                  - creationOuput:
+                                        assign:
+                                        - output: '${list.concat(output, newAlternateEmail+" added")}'
+                                  - log_createUserAliasResponse:
+                                        call: sys.log
+                                        args:
+                                            text: ${createUserAliasResponse}
+                                            severity: DEBUG
+      - return_output:
+          return: ${output}
+# Sub Workflow to extract event data from decoded json associated with an externalids change event
+subworkflow_extract_event_data:
+    params: [event]
+    steps:
+        - initVariable:
+            assign:
+            - userUPN: null
+            - oldAlternateEmail: null
+            - newAlternateEmail: null
+        - extractLoop:
+            for:
+              value: parameter
+              in: ${event}
+              steps:
+                  - checkType:
+                      switch:
+                        - condition: ${parameter.name == "USER_EMAIL"}
+                          assign:
+                          - userUPN: ${parameter.value}
+                        - condition: ${parameter.name == "OLD_VALUE"}
+                          assign:
+                          - oldAlternateEmail: ${subworkflow_extract_login_id(parameter.value)}
+                        - condition: ${parameter.name == "NEW_VALUE"}
+                          assign:
+                          - newAlternateEmail: ${subworkflow_extract_login_id(parameter.value)}
+                      next: continue
+        - prepareMessage:
+            assign:
+            - eventData:
+                UserUPN: ${userUPN}
+                OldAlternateEmail: ${oldAlternateEmail}
+                NewAlternateEmail: ${newAlternateEmail}
+        - outputMessage:
+            return: ${eventData}
+# Sub Workflow to extract a login_id from decoded json associated with an externalids change event
+subworkflow_extract_login_id:
+    params: [input]
+    steps:
+    - extract:
+        assign:
+            - temp: ${text.find_all_regex(input,"LOGIN_ID:.*\"")}
+            - output: ${text.substring(temp[0].match,9,len(temp[0].match)-1)}
+    - returnOutput:
+            return: ${output}
