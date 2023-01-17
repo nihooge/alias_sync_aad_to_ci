@@ -14,7 +14,7 @@ You may obtain a copy of the License at
 
 # Alternate Email Sync 
 This repository is provided as companion source code for the series of article published on Medium:
-Alias synchronization from Azure Active Directory and Google Cloud Identity
+[Alias synchronization from Azure Active Directory and Google Cloud Identity](https://medium.com/@nicolas.hooge/alias-synchronization-from-azure-active-directory-to-google-cloud-identity-part-1-7b9059e35405)
 
 ## Disclaimer: 
 This repository and its contents are not an official Google Product.
